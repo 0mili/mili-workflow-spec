@@ -23,51 +23,196 @@ spec:
   entrypoint: "mulai"
   analytics:
     type: RabbitMQ / WebHook / NATS / Kafka / Redis PubSub / Pulsar / Google PubSub / etc -> fokus ke RabbitMQ
+  session:
+    type: redis
+  env:
+    - name: ELASTIC_URL
+      value: ''
+    - name: RABBITMQ_URL
+      value: ''
+    - name: REDIS_URL
+      value: ''
 
-env:
-  - name: ELASTIC_URL
-    value: ''
-  - name: RABBITMQ_URL
-    value: ''
+stores:
+
+  redis:
+    - name: "set conversation session id"
+      cmd: "SET conv:session:{{ session_id }} {{ session_data }} 3600"
+    - name: "get conversation session id"
+      cmd: "GET conv:session:{{ session_id }}"
+    - name: "set conversation expiration"
+      cmd: "EXPIRE conv:session:{{ session_id }} 3600"
+
+  rabbitMQ:
+    - name: "analytics"
+      routing-key: "analytics:queue"
+      data: "{{ analytics }}"
+
+  elastic:
+    - name: "get symptoms for chief complaint"
+      document: ""
+      data: ""
+    - name: "get nice to know questions"
+      document: ""
+
 
 # States Definition
 states:
   mulai:
     name: "Mulai Prixa"
+    flow:
+      before: None
+      after: consent
+    on:
+      start: "start_mulai.py"
+      action: "action_mulai.py"
+      fail: "fail_mulai.py"
   consent:
     name: "Consent"
+    flow:
+      before: mulai
+      after:
+        - name: "agree"
+          cond: "{{ consent == true }}"
+          state: ask-insurance
+        - name: "diagree"
+          cond: "{{ consent == false }}"
+          state: end-conversation-consent-disagree
+    on:
+      start: "start_consent.py"
+      action: "action_consent.py"
+      fail: "fail_consent.py"
+  end-conversation-consent-disagree:
+    name: "end conversation consent disagree"
+    flow:
+      before:
+        - name: "disagree"
+          cond: "{{ consent == false }}"
+          state: "consent"
+    on:
+      start: "start_consent_disagree.py"
+      action: "action_consent_disagree.py"
+      fail: "fail_consent_disagree.py"
+  insurance:
+    sub:
+      - name: "ask insurance"
+        state: ask-insurance
+        flow:
+          before:
+            - name: "agree"
+              cond: "{{ consent == false }}"
+              state: "consent"
+          after:
+            - name: "agree"
+              cond: "{{ isAlreadyHaveInsurance == true }}"
+              state: preconditions
+            - name: "diagree"
+              cond: "{{ isAlreadyHaveInsurance == false }}"
+              state: "plan-to-have-insurance"
+        on:
+          start: "start_ask_insurance.py"
+          action: "action_ask_insurance.py"
+          fail: "fail_ask_insurance.py"
+      - name: "ask plan to have insurance"
+        state: plan-to-have-insurance
+        flow:
+          before:
+            - name: "agree"
+              cond: "{{ isAlreadyHaveInsurance == false }}"
+              state: "ask-insurance"
+          after: "preconditions"
+        on:
+          start: "start_plan_to_have_insurance.py"
+          action: "action_plan_to_have_insurance.py"
+          fail: "fail_plan_to_have_insurance.py"
   preconditions:
     name: "preconditions"
-  finish:
+    flow:
+      before:
+        - name: "answred plan agree or disagree to have insurance"
+          state: plan-to-have-insurance
+        - name: "already have insurance"
+          state: ask-insurance
+      after: "chief-complaint"
+    on:
+      start: "start_preconditions.py"
+      action: "action_preconditions.py"
+      fail: "fail_preconditions.py"
+  chief-complaint:
+    name: "Chief complaint"
+    flow:
+      before: preconditions
+      after: questions
+    on:
+      start: "start_chief_complaint.py"
+      action: "action_chief_complaint.py"
+      fail: "fail_chief_complaint.py"
+
+  # Nested sub-states
+  questions:
+    sub:
+      - name: "Nice to know"
+        state: nice-to-know
+        flow:
+          before: preconditions
+          after:
+            - name: "go to next topic"
+              cond: "{{ questionFinished == false }}"
+              state: must-know
+        on:
+          start: "start_nice_to_know_questions.py"
+          action: "action_nice_to_know_questions.py"
+          fail: "fail_nice_to_know_questions.py"
+      - name: "Must know"
+        state: must-know
+        flow:
+          before:
+            - name: "there is nice to know questions"
+              state: nice-to-know
+          after:
+            - name: "go to next topic"
+              cond: "{{ questionFinished == false }}"
+              state: must-have
+        on:
+          start: "start_must_know_questions.py"
+          action: "action_must_know_questions.py"
+          fail: "fail_must_know_questions.py"
+      - name: "Must have"
+        state: must-have
+        flow:
+          before: preconditions
+          after:
+            - name: "go to next topic"
+              cond: "{{ questionFinished == false }}"
+              state: other-questions
+        on:
+          start: "start_must_have_questions.py"
+          action: "action_must_have_questions.py"
+          fail: "fail_must_have_questions.py"
+      - name: "Other questions"
+        state: other-questions
+        on:
+          start: "start_other_questions.py"
+          action: "action_other_questions.py"
+          fail: "fail_other_questions.py"
+    flow:
+      before:
+        - name: "skip sub state questions if not exists"
+          state: preconditions
+      after:
+        - name: "finish asking questions"
+          cond: "{{ questionFinished == true }}"
+          state: diagnose-result
+    on:
+      start: "start_questions.py"
+      action: "action_questions.py"
+      fail: "fail_questions.py"
+  diagnose-result:
     name: "finish"
-
-# Flows
-flows:
-  - name: flow1
-    transition:
-      before: mulai
-      after: consent
-    steps:
-      - name: "nama step A"
-        script:
-          onStart: "cond1.go"
-          onFail: ""
-      - name: "nama step A"
-        script:
-          onStart: "cond1.go"
-          onFail: ""
-  - name: flow2
-    steps:
-      - name: "nama step A"
-        script:
-          onStart: "cond1.go"
-          onFail: ""
-      - name: "nama step A"
-        script:
-          onStart: "cond1.go"
-          onFail: ""
-    transition:
-      before: Any
+    flow:
+      before: questions
       after: None
-
-
+    on:
+      start: "start_questions.py"
+      action: "action_questions.py"
+      fail: "fail_questions.py"
